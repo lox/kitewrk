@@ -58,14 +58,18 @@ func registerAction(app *kingpin.Application) error {
 			Builds:   buildCount,
 		})
 
-		log.Printf("Waiting for result")
-		result.Wait()
-
 		if errs := result.Errors(); len(errs) > 0 {
 			log.Fatal(errs)
 		}
 
-		log.Printf("Done in %v", time.Now().Sub(t))
+		s := result.Summary()
+
+		log.Printf("Finished %d builds in %v",
+			s.Total,
+			time.Now().Sub(t),
+		)
+
+		log.Printf("%#v", s)
 		return nil
 	})
 

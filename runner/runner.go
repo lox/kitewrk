@@ -29,7 +29,7 @@ func (r *Runner) Run(params Params) *Result {
 	res.Add(params.Builds)
 	go func() {
 		for i := 0; i < params.Builds; i++ {
-			log.Printf("Creating build %d", i+1)
+			t := time.Now()
 			build, _, err := r.client.Builds.Create(params.Org, params.Pipeline, &buildkite.CreateBuild{
 				Commit:  "HEAD",
 				Branch:  "master",
@@ -41,6 +41,11 @@ func (r *Runner) Run(params Params) *Result {
 				res.Done()
 				continue
 			}
+			log.Printf("Spawned build #%d (%d of %d) in %v",
+				*build.Number, i+1, params.Builds,
+				durationFmt(time.Now().Sub(t)),
+			)
+
 			if build != nil {
 				go r.pollBuild(build, i, res)
 			}
@@ -50,9 +55,16 @@ func (r *Runner) Run(params Params) *Result {
 	return res
 }
 
+func durationFmt(d time.Duration) string {
+	return fmt.Sprintf("%0.2fs", d.Seconds())
+}
+
+func timestampFmt(a, b *buildkite.Timestamp) string {
+	return durationFmt(b.Time.Sub(a.Time))
+}
+
 func (r *Runner) pollBuild(b *buildkite.Build, idx int, res *Result) {
 	ctx := context.Background()
-	// ctx, _ := context.WithTimeout(context.Background(), time.Second*5)
 	defer res.Done()
 
 	for {
@@ -70,7 +82,16 @@ func (r *Runner) pollBuild(b *buildkite.Build, idx int, res *Result) {
 				return
 			}
 			if bx.FinishedAt != nil {
-				log.Printf("Build %d finished at %v", idx+1, *bx.FinishedAt)
+				log.Printf("Build #%d is %q, finished in %v",
+					*bx.Number,
+					*bx.State,
+					timestampFmt(bx.CreatedAt, bx.FinishedAt),
+				)
+				log.Printf("\tCreated at %v", bx.CreatedAt.Local().Format(time.StampMilli))
+				log.Printf("\tScheduled in %v", timestampFmt(bx.CreatedAt, bx.ScheduledAt))
+				log.Printf("\tStarted in %v", timestampFmt(bx.CreatedAt, bx.StartedAt))
+				log.Printf("\tFinished in %v", timestampFmt(bx.StartedAt, bx.FinishedAt))
+				res.builds = append(res.builds, bx)
 				return
 			}
 		}
@@ -89,6 +110,12 @@ func New(client *buildkite.Client) *Runner {
 	}
 }
 
+type Summary struct {
+	Total, Passes, Failures int
+	WaitTime                []time.Duration
+	RunTime                 []time.Duration
+}
+
 type Result struct {
 	sync.WaitGroup
 	errors []error
@@ -98,4 +125,19 @@ type Result struct {
 func (res *Result) Errors() []error {
 	res.Wait()
 	return res.errors
+}
+
+func (res *Result) Summary() (s Summary) {
+	res.Wait()
+	s.Total = len(res.builds)
+
+	for _, b := range res.builds {
+		switch *b.State {
+		case "failed":
+			s.Failures++
+		case "passed":
+			s.Passes++
+		}
+	}
+	return
 }
