@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"net/url"
 	"os"
 	"time"
 
@@ -20,7 +21,9 @@ func main() {
 
 func registerAction(app *kingpin.Application) error {
 	var pipeline, org string
+	var branch, commit string
 	var apiToken string
+	var apiEndpoint *url.URL
 	var buildCount int
 	var debug bool
 
@@ -34,9 +37,20 @@ func registerAction(app *kingpin.Application) error {
 		Required().
 		StringVar(&pipeline)
 
+	app.Flag("branch", "The buildkite branch to target").
+		Default("master").
+		StringVar(&branch)
+
+	app.Flag("commit", "The buildkite commit to target").
+		Default("HEAD").
+		StringVar(&commit)
+
 	app.Flag("api-token", "A buildkite api token").
 		Required().
 		StringVar(&apiToken)
+
+	app.Flag("api-endpoint", "The buildkite api endpoint to use").
+		URLVar(&apiEndpoint)
 
 	app.Flag("builds", "Number of builds to create").
 		Default("8").
@@ -52,10 +66,18 @@ func registerAction(app *kingpin.Application) error {
 
 		t := time.Now()
 		client := buildkite.NewClient(config.Client())
+
+		if apiEndpoint != nil {
+			client.BaseURL = apiEndpoint
+			config.APIHost = apiEndpoint.Host
+		}
+
 		result := runner.New(client).Run(runner.Params{
 			Org:      org,
 			Pipeline: pipeline,
 			Builds:   buildCount,
+			Branch:   branch,
+			Commit:   commit,
 		})
 
 		if errs := result.Errors(); len(errs) > 0 {
@@ -69,7 +91,6 @@ func registerAction(app *kingpin.Application) error {
 			time.Now().Sub(t),
 		)
 
-		log.Printf("%#v", s)
 		return nil
 	})
 

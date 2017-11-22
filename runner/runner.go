@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"regexp"
 	"strconv"
 	"sync"
@@ -21,6 +22,8 @@ type Params struct {
 	Org      string
 	Pipeline string
 	Builds   int
+	Branch   string
+	Commit   string
 }
 
 func (r *Runner) Run(params Params) *Result {
@@ -31,8 +34,8 @@ func (r *Runner) Run(params Params) *Result {
 		for i := 0; i < params.Builds; i++ {
 			t := time.Now()
 			build, _, err := r.client.Builds.Create(params.Org, params.Pipeline, &buildkite.CreateBuild{
-				Commit:  "HEAD",
-				Branch:  "master",
+				Commit:  params.Commit,
+				Branch:  params.Branch,
 				Message: fmt.Sprintf(":rocket: kitewrk build %d of %d", i+1, params.Builds),
 			})
 			if err != nil {
@@ -82,6 +85,11 @@ func (r *Runner) pollBuild(b *buildkite.Build, idx int, res *Result) {
 				return
 			}
 			if bx.FinishedAt != nil {
+				if *bx.State == "not_run" {
+					log.Printf("Build #%d finished with %q, disable build skipping")
+					os.Exit(1)
+				}
+
 				log.Printf("Build #%d is %q, finished in %v",
 					*bx.Number,
 					*bx.State,
