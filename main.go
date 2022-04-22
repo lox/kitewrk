@@ -1,13 +1,15 @@
 package main
 
 import (
+	"fmt"
 	"log"
-	"net/url"
 	"os"
 	"time"
 
-	buildkite "github.com/buildkite/go-buildkite/buildkite"
+	"github.com/lox/kitewrk/buildkite"
 	"github.com/lox/kitewrk/runner"
+
+	"github.com/bsipos/thist"
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
 )
 
@@ -20,10 +22,9 @@ func main() {
 }
 
 func registerAction(app *kingpin.Application) error {
-	var pipeline, org string
+	var pipelineID, org, pipelineSlug string
 	var branch, commit string
-	var apiToken string
-	var apiEndpoint *url.URL
+	var graphqlToken string
 	var buildCount int
 	var debug bool
 
@@ -33,9 +34,11 @@ func registerAction(app *kingpin.Application) error {
 	app.Flag("org", "The organization to create builds in").
 		StringVar(&org)
 
-	app.Flag("pipeline", "The buildkite pipeline to create builds in").
-		Required().
-		StringVar(&pipeline)
+	app.Flag("pipeline-slug", "The buildkite pipeline to create builds in").
+		StringVar(&pipelineSlug)
+
+	app.Flag("pipeline-id", "The buildkite pipeline to create builds in").
+		StringVar(&pipelineID)
 
 	app.Flag("branch", "The buildkite branch to target").
 		Default("master").
@@ -45,39 +48,27 @@ func registerAction(app *kingpin.Application) error {
 		Default("HEAD").
 		StringVar(&commit)
 
-	app.Flag("api-token", "A buildkite api token").
+	app.Flag("graphql-token", "A buildkite graphql token").
 		Required().
-		StringVar(&apiToken)
-
-	app.Flag("api-endpoint", "The buildkite api endpoint to use").
-		URLVar(&apiEndpoint)
+		StringVar(&graphqlToken)
 
 	app.Flag("builds", "Number of builds to create").
 		Default("8").
 		IntVar(&buildCount)
 
 	app.Action(func(c *kingpin.ParseContext) error {
-		config, err := buildkite.NewTokenConfig(apiToken, false)
-		if err != nil {
-			log.Fatalf("Failed to create config: %s", err)
-		}
-
-		buildkite.SetHttpDebug(debug)
-
 		t := time.Now()
-		client := buildkite.NewClient(config.Client())
 
-		if apiEndpoint != nil {
-			client.BaseURL = apiEndpoint
-			config.APIHost = apiEndpoint.Host
+		client, err := buildkite.NewClient(graphqlToken)
+		if err != nil {
+			return err
 		}
 
 		result := runner.New(client).Run(runner.Params{
-			Org:      org,
-			Pipeline: pipeline,
-			Builds:   buildCount,
-			Branch:   branch,
-			Commit:   commit,
+			PipelineID: pipelineID,
+			Builds:     buildCount,
+			Branch:     branch,
+			Commit:     commit,
 		})
 
 		if errs := result.Errors(); len(errs) > 0 {
@@ -86,10 +77,23 @@ func registerAction(app *kingpin.Application) error {
 
 		s := result.Summary()
 
+		log.Printf("%#v", s)
+
 		log.Printf("Finished %d builds in %v",
 			s.Total,
 			time.Now().Sub(t),
 		)
+
+		h := thist.NewHist(nil, "Wait Times", "auto", -1, true)
+
+		for _, t := range s.JobWaitTimes {
+			h.Update(t.Seconds())
+		}
+
+		fmt.Println(h.Draw())
+
+		// log.Printf("Average Build time: %v", s.JobRunTimes)
+		// log.Printf("Average Wait time: %v")
 
 		return nil
 	})

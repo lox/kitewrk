@@ -6,11 +6,10 @@ import (
 	"log"
 	"os"
 	"regexp"
-	"strconv"
 	"sync"
 	"time"
 
-	buildkite "github.com/buildkite/go-buildkite/buildkite"
+	"github.com/lox/kitewrk/buildkite"
 )
 
 type Runner struct {
@@ -19,11 +18,10 @@ type Runner struct {
 }
 
 type Params struct {
-	Org      string
-	Pipeline string
-	Builds   int
-	Branch   string
-	Commit   string
+	PipelineID string
+	Builds     int
+	Branch     string
+	Commit     string
 }
 
 func (r *Runner) Run(params Params) *Result {
@@ -33,24 +31,25 @@ func (r *Runner) Run(params Params) *Result {
 	go func() {
 		for i := 0; i < params.Builds; i++ {
 			t := time.Now()
-			build, _, err := r.client.Builds.Create(params.Org, params.Pipeline, &buildkite.CreateBuild{
-				Commit:  params.Commit,
-				Branch:  params.Branch,
-				Message: fmt.Sprintf(":rocket: kitewrk build %d of %d", i+1, params.Builds),
+			buildResp, err := r.client.BuildCreate(buildkite.BuildCreateParams{
+				PipelineID: params.PipelineID,
+				Commit:     params.Commit,
+				Branch:     params.Branch,
+				Message:    fmt.Sprintf(":rocket: kitewrk build %d of %d", i+1, params.Builds),
 			})
 			if err != nil {
-				log.Println("Error creating build", err)
+				fmt.Println("Error creating build", err)
 				res.errors = append(res.errors, err)
 				res.Done()
 				continue
 			}
-			log.Printf("Spawned build #%d (%d of %d) in %v",
-				*build.Number, i+1, params.Builds,
+			fmt.Printf("Spawned build #%d (%d of %d) in %v\n",
+				buildResp.Number, i+1, params.Builds,
 				durationFmt(time.Now().Sub(t)),
 			)
 
-			if build != nil {
-				go r.pollBuild(build, i, res)
+			if buildResp != nil {
+				go r.pollBuild(*buildResp, i, res)
 			}
 		}
 	}()
@@ -62,11 +61,11 @@ func durationFmt(d time.Duration) string {
 	return fmt.Sprintf("%0.2fs", d.Seconds())
 }
 
-func timestampFmt(a, b *buildkite.Timestamp) string {
-	return durationFmt(b.Time.Sub(a.Time))
+func timestampFmt(a, b time.Time) string {
+	return durationFmt(b.Sub(a))
 }
 
-func (r *Runner) pollBuild(b *buildkite.Build, idx int, res *Result) {
+func (r *Runner) pollBuild(br buildkite.BuildCreateResponse, idx int, res *Result) {
 	ctx := context.Background()
 	defer res.Done()
 
@@ -77,29 +76,30 @@ func (r *Runner) pollBuild(b *buildkite.Build, idx int, res *Result) {
 			return
 
 		case <-time.After(1 * time.Second):
-			bx, _, err := r.client.Builds.Get(
-				getOrgFromURL(*b.URL), *b.Pipeline.Slug, strconv.Itoa(*b.Number),
-			)
+			buildResp, err := r.client.GetBuild(buildkite.GetBuildParams{
+				Slug: fmt.Sprintf("%s/%s/%d", br.OrgSlug, br.PipelineSlug, br.Number),
+			})
 			if err != nil {
 				res.errors = append(res.errors, ctx.Err())
 				return
 			}
-			if bx.FinishedAt != nil {
-				if *bx.State == "not_run" {
-					log.Printf("Build #%d finished with %q, disable build skipping")
+
+			if buildResp.FinishedAt != nil {
+				if buildResp.State == "not_run" {
+					fmt.Printf("Build #%d finished with %q, disable build skipping\n",
+						buildResp.Number, buildResp.State)
 					os.Exit(1)
 				}
 
-				log.Printf("Build #%d is %q, finished in %v",
-					*bx.Number,
-					*bx.State,
-					timestampFmt(bx.CreatedAt, bx.FinishedAt),
+				log.Printf("Build #%d is %q, finished in %v\n",
+					buildResp.Number,
+					buildResp.State,
+					durationFmt(buildResp.Time),
 				)
-				log.Printf("\tCreated at %v", bx.CreatedAt.Local().Format(time.StampMilli))
-				log.Printf("\tScheduled in %v", timestampFmt(bx.CreatedAt, bx.ScheduledAt))
-				log.Printf("\tStarted in %v", timestampFmt(bx.CreatedAt, bx.StartedAt))
-				log.Printf("\tFinished in %v", timestampFmt(bx.StartedAt, bx.FinishedAt))
-				res.builds = append(res.builds, bx)
+				fmt.Printf("\tCreated at %v\n", buildResp.CreatedAt.Local().Format(time.StampMilli))
+				fmt.Printf("\tJob Wait Time %v\n", durationFmt(buildResp.JobWaitTime))
+				fmt.Printf("\tJob Run Time %v\n", durationFmt(buildResp.JobTime))
+				res.builds = append(res.builds, *buildResp)
 				return
 			}
 		}
@@ -120,14 +120,15 @@ func New(client *buildkite.Client) *Runner {
 
 type Summary struct {
 	Total, Passes, Failures int
-	WaitTime                []time.Duration
-	RunTime                 []time.Duration
+	BuildTimes              []time.Duration
+	JobWaitTimes            []time.Duration
+	JobRunTimes             []time.Duration
 }
 
 type Result struct {
 	sync.WaitGroup
 	errors []error
-	builds []*buildkite.Build
+	builds []buildkite.GetBuildResponse
 }
 
 func (res *Result) Errors() []error {
@@ -140,11 +141,14 @@ func (res *Result) Summary() (s Summary) {
 	s.Total = len(res.builds)
 
 	for _, b := range res.builds {
-		switch *b.State {
-		case "failed":
-			s.Failures++
-		case "passed":
+		switch b.State {
+		case buildkite.BuildPassedState:
 			s.Passes++
+			s.BuildTimes = append(s.BuildTimes, b.Time)
+			s.JobWaitTimes = append(s.JobWaitTimes, b.JobWaitTime)
+			s.JobRunTimes = append(s.JobRunTimes, b.JobTime)
+		default:
+			s.Failures++
 		}
 	}
 	return
